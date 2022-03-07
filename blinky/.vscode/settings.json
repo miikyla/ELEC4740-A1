@@ -1,0 +1,24 @@
+{
+  "extensions.ignoreRecommendations": true,
+  "C_Cpp.default.configurationProvider": "particle.particle-vscode-core",
+  "cortex-debug.openocdPath": "${command:particle.getDebuggerOpenocdPath}",
+  "files.associations": {
+    "*.ino": "cpp"
+  },
+  "C_Cpp_Runner.warnings": [
+    "-Wall",
+    "-Wextra",
+    "-Wpedantic"
+  ],
+  "C_Cpp_Runner.compilerArgs": [],
+  "C_Cpp_Runner.includePaths": [],
+  "C_Cpp_Runner.linkerArgs": [],
+  "C_Cpp_Runner.cStandard": "",
+  "C_Cpp_Runner.cppStandard": "",
+  "C_Cpp_Runner.excludeSearch": [],
+  "C_Cpp_Runner.enableWarnings": true,
+  "C_Cpp_Runner.warningsAsError": false,
+  "particle.firmwareVersion": "3.2.0",
+  "particle.targetPlatform": "argon",
+  "particle.targetDevice": ""
+}
