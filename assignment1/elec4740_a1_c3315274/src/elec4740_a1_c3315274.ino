@@ -56,11 +56,18 @@ void setup() {
 void loop() {
 
     // Test the light sensor
-    // pccResult = analogRead(lightPin);
+    unsigned int avgLightRead = 0;  // Summation of light reads.
 
-    // unsigned long lightRes = (resistorTwo/(resistorOne + resistorTwo)) * 3.3; // 5V power supply
+    for(int i = 0; i < 100; i++)
+    {
+        avgLightRead += analogRead(lightPin);
+    }
 
-    // Serial.printf("ADC value: %d\n", pccResult);
+    lightRead = avgLightRead/100;               // Read the ADC value for the light resistor.
+    
+    
+    lightResult = 36.9*lightRead + 117;             // Transfer function for the light into lux.
+    Serial.printf("ADC value: %d\n", lightRead);
 
     // Test the sound sensor
 
