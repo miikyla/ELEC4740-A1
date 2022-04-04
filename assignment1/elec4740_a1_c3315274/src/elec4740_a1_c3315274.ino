@@ -87,5 +87,5 @@ void loop() {
 
     // Serial.printf("Range finding duration: %lu | Distance in cm: %.2f\n", calcTime, cmDistance);
     
-    // delay(500);
+    delay(500);
 }
