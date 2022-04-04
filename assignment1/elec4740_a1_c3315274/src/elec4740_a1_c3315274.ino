@@ -67,7 +67,12 @@ void loop() {
     
     
     lightResult = 36.9*lightRead + 117;             // Transfer function for the light into lux.
+    // Transfer function for the light into lux.
+    lightResult = 809*lightRead - 1523;
+
     Serial.printf("ADC value: %d\n", lightRead);
+    
+    Serial.printf("Lux value: %d lux\n", lightResult);
 
     // Test the sound sensor
 
