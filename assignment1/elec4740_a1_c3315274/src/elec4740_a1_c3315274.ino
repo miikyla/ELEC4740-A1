@@ -18,7 +18,6 @@ SYSTEM_MODE(MANUAL);
 // Movement sensor
 const int triggerPin    = D1;
 const int echoPin       = D0;
-// HC_SR04 rangefinder     = HC_SR04(triggerPin, echoPin);
 
 unsigned long start     = 0;
 float cmDistance        = 0.0;
@@ -27,10 +26,8 @@ unsigned long calcTime  = 0;
 // Light sensor
 const int lightPin          = A1;
 
-unsigned int pccResult      = 0;       // PCC "resistor" ADC value.
-unsigned int resistorOne    = 10000;   // 10K resistor.
-unsigned int resistorTwo    = 0;       // Converted resistor value from ADC value.
-
+unsigned int lightRead      = 0;    // Averaged raw ADC read from the GPIO pin for the light sensor.
+unsigned long lightResult   = 0;    // Transfer function from ADC to lux.
 // Sound sensor
 const int soundPin      = A2;
 
