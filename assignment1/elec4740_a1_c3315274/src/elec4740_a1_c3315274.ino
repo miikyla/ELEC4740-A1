@@ -8,6 +8,7 @@
 #include "Particle.h"
 #include "dct.h"
 #include "HC-SR04.h"
+#include "math.h"
 
 /************************************
  *          INITIALISATION          *
@@ -27,9 +28,15 @@ unsigned long calcTime  = 0;
 const int lightPin          = A1;
 
 unsigned int lightRead      = 0;    // Averaged raw ADC read from the GPIO pin for the light sensor.
-unsigned long lightResult   = 0;    // Transfer function from ADC to lux.
+unsigned int lightResult   = 0;    // Transfer function from ADC to lux.
+float lightVout     = 0;
+float lux           = 0;
+float rPcc          = 0;
+long lightLux      = 0;
+
 // Sound sensor
 const int soundPin      = A2;
+int soundPkPk           = 0;
 
 /************************************
  *          SETUP                   *
@@ -65,27 +72,47 @@ void loop() {
 
     lightRead = avgLightRead/100;               // Read the ADC value for the light resistor.
     
-    
-    lightResult = 36.9*lightRead + 117;             // Transfer function for the light into lux.
-    // Transfer function for the light into lux.
-    lightResult = 809*lightRead - 1523;
+    // Transfer function for the ADC reaidng to Vout
+    lightVout = 3.3 * lightRead/4096;
+    rPcc = (1000 * 3.3) / (lightVout) - 1000;
+    lightLux = 9512 * exp(-0.939 * rPcc);
 
-    Serial.printf("ADC value: %d\n", lightRead);
-    
-    Serial.printf("Lux value: %d lux\n", lightResult);
+   // Serial.printf("ADC: %d | vout: %f | R2: %f | lux: %f \n", lightRead, lightVout, rPcc, lightLux);
 
     // Test the sound sensor
+    unsigned int tempSoundRead = 0;  // Summation of light reads.
+    unsigned int maxAmpl = 0;
+    unsigned int minAmpl = 4096;
+
+    for(int i = 0; i < 500; i++)
+    {
+        tempSoundRead = analogRead(soundPin);
+
+        if (tempSoundRead > maxAmpl)
+        {
+            maxAmpl = tempSoundRead;
+        }
+
+        if (tempSoundRead < minAmpl)
+        {
+            minAmpl = tempSoundRead;
+        }
+    }
+
+    soundPkPk = maxAmpl - minAmpl;
+    Serial.printf("max: %d | min: %d | pk: %d \n", maxAmpl, minAmpl, soundPkPk);
+
 
     // Test the movement sensor
-    digitalWrite(triggerPin, LOW); 
-    delayMicroseconds(2);
-    digitalWrite(triggerPin, HIGH); // Pulse for 10μ s to trigger ultrasonic detection
-    delayMicroseconds(10); 
-    digitalWrite(triggerPin, LOW);
-    int distance = pulseIn(echoPin, HIGH); // Read receiver pulse time 
-    distance= distance/58; // Transform pulse time to distance 
-    Serial.println(distance); //Output distance
-    delay(50);
+    // digitalWrite(triggerPin, LOW); 
+    // delayMicroseconds(2);
+    // digitalWrite(triggerPin, HIGH); // Pulse for 10μ s to trigger ultrasonic detection
+    // delayMicroseconds(10); 
+    // digitalWrite(triggerPin, LOW);
+    // int distance = pulseIn(echoPin, HIGH); // Read receiver pulse time 
+    // distance= distance/58; // Transform pulse time to distance 
+    // Serial.println(distance); //Output distance
+    // delay(50);
     // start = micros();
     // cmDistance = rangefinder.distCM();
     // calcTime = micros() - start;
