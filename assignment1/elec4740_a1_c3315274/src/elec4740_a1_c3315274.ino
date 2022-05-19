@@ -5,12 +5,48 @@
  * Date: 07/03/2022
  */
 
+// BLUETOOTH: https://www.jaredwolff.com/how-to-use-particles-powerful-bluetooth-api/
+
 #include "Particle.h"
 #include "dct.h"
 #include "math.h"
 
 #define NUM_LIGHT_READS 100
 #define NUM_SOUND_READS 500
+
+typedef struct {
+    uint8_t red;
+    uint8_t green;
+    uint8_t blue;
+} led_level_t;
+
+static led_level_t m_led_level;
+
+const char* serviceUuid = "6E400009-B5A3-F393-E0A9-E50E24DCCA9E";
+const char* red         = "6E400010-B5A3-F393-E0A9-E50E24DCCA9E";
+const char* green       = "6E400011-B5A3-F393-E0A9-E50E24DCCA9E";
+const char* blue        = "6E400012-B5A3-F393-E0A9-E50E24DCCA9E";
+
+
+ // Static function for handling Bluetooth Low Energy callbacks
+ static void onDataReceived(const uint8_t* data, size_t len, const BlePeerDevice& peer, void* context) {
+    // We're only looking for one byte
+    if( len != 1 ) {
+        return;
+    }
+
+    // Sets the global level
+    if( context == red ) {
+        m_led_level.red = data[0];
+    } else if ( context == green ) {
+        m_led_level.green = data[0];
+    } else if ( context == blue ) {
+        m_led_level.blue = data[0];
+    }
+
+    // Set RGB color
+    RGB.color(m_led_level.red, m_led_level.green, m_led_level.blue);
+ }
 
 /************************************
  *          INITIALISATION          *
@@ -41,12 +77,30 @@ int soundPkPk       = 0;    // Pk-pk value of the incoming sound wave.
 float soundVout     = 0;    // Sound ADC reading converted to voltage.
 float soundDba      = 0;    // Calculated sound value in dBa.
 
+// Bluetooth
+BleAdvertisingData advData;
+BleUuid rgbService(serviceUuid);
+
 /************************************
  *          SETUP                   *
  ************************************/
 void setup() {
     Serial.begin(9600);
-    Particle.connect();
+    //Particle.connect();
+
+    // Initialise the Bluetooth control
+    RGB.control(true);
+
+    BleCharacteristic redCharacteristic("red", BleCharacteristicProperty::WRITE_WO_RSP, red, serviceUuid, onDataReceived, (void*)red); // Initialise service ID
+    BleCharacteristic greenCharacteristic("green", BleCharacteristicProperty::WRITE_WO_RSP, green, serviceUuid, onDataReceived, (void*)green); // Initialise service ID
+    BleCharacteristic blueCharacteristic("blue", BleCharacteristicProperty::WRITE_WO_RSP, blue, serviceUuid, onDataReceived, (void*)blue); // Initialise service ID
+
+    BLE.addCharacteristic(redCharacteristic);  // Add the characteristics
+    BLE.addCharacteristic(greenCharacteristic); // Add the characteristics
+    BLE.addCharacteristic(blueCharacteristic);  // Add the characteristics
+
+    advData.appendServiceUUID(rgbService); // Add the RGB LED service
+    BLE.advertise(&advData); // Start advertising!
 
     // Initialise the light sensor
     pinMode(lightPin, INPUT); 
@@ -57,14 +111,12 @@ void setup() {
     // Initialise the movement sensor
     pinMode(echoPin, INPUT); 
     pinMode(trigPin, OUTPUT);
-
 }
 
 /************************************
  *          LOOP                    *
  ************************************/
 void loop() {
-
     // ------------- LIGHT SENSOR -------------
     lightLux[1] = lightLux[0];
     unsigned int avgLightRead = 0;  // Summation of light reads.
