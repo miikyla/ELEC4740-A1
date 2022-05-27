@@ -47,8 +47,8 @@ lightLevel curr_light_lvl   = L_OFF;
 
 uint16_t light_pwr_consumption[4]   = {0, 5, 7, 10};    // Power consumed by the light module when in each enum lightLevel [mW]
 unsigned long light_pwr_time[2]     = {0,0};            // Start time and end time of the current light level to calculate power consumption [ms]
-float total_pwr_consumption         = 0;                // Lifetime power consumption of the device since bootup [mWh]
-const float pwr_budget              = 2100;             // Maximum amount of power consumption allowed per hour before power management kicks and throttles NORMAL mode [mWh]
+float total_pwr_consumption         = 0;                // Lifetime power consumption of the device since bootup [mWs]
+const float pwr_budget              = 2100*3600;        // Maximum amount of power consumption allowed per hour before power management kicks and throttles NORMAL mode [mWs] (NOTE: in seconds since float becomes too small).
 
 float curr_sound_val        = 0;
 uint8_t sound_duration_sec  = 0;
@@ -156,13 +156,10 @@ void setup() {
 void loop() {
 
     // Calculate how many hours board has been on
-    uint16_t hours_up = floor(millis()/MS_IN_HR);
+    uint16_t hours_up = floor(millis()/MS_IN_HR) + 1; // Ceil not working properly?
 
     // Check if the power budget for the hour has been exceeded.
-    if(total_pwr_consumption > hours_up*pwr_budget)
-    {
-        b_in_power_budget = 0;
-    }
+    b_in_power_budget = (total_pwr_consumption > hours_up*pwr_budget) ? 0 : 1;
 
     // Running in NORMAL mode
     if(!b_is_security_mode && b_in_power_budget)
@@ -194,10 +191,10 @@ void loop() {
             // Calculate the total amount of time that the module has been running at the (now previous) light intensity level.
             light_pwr_time[1] = light_pwr_time[0];
             light_pwr_time[0] = millis(); // Used to calculate the amount of power consumed.
-            float time_spent_hr = (light_pwr_time[0] - light_pwr_time[1]) * 1/1000 * 1/60 * 1/60; // ms * sec/ms * min/sec * hour/min
+            float time_spent_sec = (light_pwr_time[0] - light_pwr_time[1]) * 1/1000; // ms * sec/ms
 
             // Increment the total power consumption.
-            total_pwr_consumption += light_pwr_consumption[prev_light_lvl] * time_spent_hr;
+            total_pwr_consumption += light_pwr_consumption[prev_light_lvl] * time_spent_sec;
 
             // Change the light level.
             switch(curr_light_lvl)
