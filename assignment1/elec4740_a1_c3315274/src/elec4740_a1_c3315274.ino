@@ -1,9 +1,13 @@
-#define SN1
-//#define SN2
+//#define SN1
+#define SN2
 //#define CENTRAL
 
 #include "Particle.h"
 #include "math.h"
+
+SYSTEM_MODE(MANUAL);
+
+#ifdef SN1
 
 #define MS_IN_HR 3600000
 
@@ -29,9 +33,6 @@ enum alarmSource
     SOUND
 };
 
-SYSTEM_MODE(MANUAL);
-
-#ifdef SN1
 // ----------------------------------------------------------------------------
 // SYSTEM VARIABLES
 // ----------------------------------------------------------------------------
@@ -545,68 +546,495 @@ int readDistance()
 #endif
 
 #ifdef SN2
+
+#define MS_IN_HR 3600000
+
+#define NUM_SOUND_READS 500
+
+#define FAN_OFF 0
+#define FAN_1 100
+#define FAN_2 255
+
+enum fanLevel
+{
+    F_OFF,
+    F_LOW,
+    F_HIGH
+};
+
+enum alarmSource
+{
+    NONE,
+    MOVEMENT,
+    SOUND
+};
+
+// ----------------------------------------------------------------------------
+// SYSTEM VARIABLES
+// ----------------------------------------------------------------------------
+// System state
+bool b_is_security_mode     = 0;    // Set high when the sensor node is operating in SECURITY mode.
+bool b_is_security_event    = 0;    // Set high when a notifiable security event has occured.
+bool b_in_power_budget      = 1;    // Set low when the hourly power consumption budget has been exceeded.
+alarmSource eventTrigger    = NONE; // Cause of security incident when operating in SECURITY mode.
+
+long curr_temp_val        = 0;
+fanLevel prev_temp_lvl    = F_OFF;
+fanLevel curr_temp_lvl    = F_OFF;
+
+uint16_t fan_pwr_consumption[4]   = {0, 392, 1000};     // Power consumed by the fan module when in each enum fanLevel [mW]
+unsigned long fan_pwr_time[2]     = {0,0};              // Start time and end time of the current fan level to calculate power consumption [ms]
+float total_pwr_consumption         = 0;                // Lifetime power consumption of the device since bootup [mWs]
+const float pwr_budget              = 2100*3600;        // Maximum amount of power consumption allowed per hour before power management kicks and throttles NORMAL mode [mWs] (NOTE: in seconds since float becomes too small).
+
+float curr_sound_val        = 0;
+uint8_t sound_duration_sec  = 0;
+bool b_is_first_sound_instance  = 0;
+unsigned long sound_start_time  = 0;
+
+int curr_dist_val           = 0;
+int prev_dist_val           = 0; 
+bool b_is_first_dist_read   = 1;
+
+// Lamp actuator
+const int fanPin    = D3;
+
+// Movement sensor
+const int trigPin   = D0;
+const int echoPin   = D1;
+int duration        = 0;
+int distance        = 0;
+
+// Temp sensor
+const int tempPin   = A0;
+float temp_res      = 0;
+float reading       = 0;
+float voltage       = 0;
+
+// Sound sensor
+const int soundPin  = A2;
+
+int soundPkPk       = 0;    // Pk-pk value of the incoming sound wave.
+float soundVout     = 0;    // Sound ADC reading converted to voltage.
+float soundDba      = 0;    // Calculated sound value in dBa.
+
+// ----------------------------------------------------------------------------
+// BLUETOOTH
+// ----------------------------------------------------------------------------
+
 // UUIDs for service + characteristics
-const char* serviceUuid = "b4250500-fb4b-4746-b2b0-93f0e61122c6"; //service
-const char* red         = "b4250501-fb4b-4746-b2b0-93f0e61122c6"; //red char
-const char* status      = "b4250504-fb4b-4746-b2b0-93f0e61122c6"; //status char
-
-// Set the RGB BLE service
-BleUuid rgbService(serviceUuid);
-
-bool colour_state = 0;
-uint16_t r1 = 3;
-uint16_t r2 = 4;
+const char* serviceUuid = "b4250500-fb4b-4746-b2b0-93f0e61122c6";
+const char* temperature = "b4250501-fb4b-4746-b2b0-93f0e61122c6";
+const char* sound       = "b4250502-fb4b-4746-b2b0-93f0e61122c6";
+const char* movement    = "b4250503-fb4b-4746-b2b0-93f0e61122c6";
+const char* security    = "b4250504-fb4b-4746-b2b0-93f0e61122c6";
 
 // Set up characteristics
-BleCharacteristic redCharacteristic("red", BleCharacteristicProperty::NOTIFY, red, serviceUuid, onDataReceived, (void*)red);
-BleCharacteristic statusCharacteristic("status", BleCharacteristicProperty::WRITE, status, serviceUuid, onDataReceived, (void*)status);
+BleUuid sensorNodeService(serviceUuid);
 
+BleCharacteristic temperatureCharacteristic("temperature", BleCharacteristicProperty::NOTIFY, temperature, serviceUuid, onDataReceived, (void*)temperature);
+BleCharacteristic soundCharacteristic("sound", BleCharacteristicProperty::NOTIFY, sound, serviceUuid, onDataReceived, (void*)sound);
+BleCharacteristic movementCharacteristic("movement", BleCharacteristicProperty::NOTIFY, movement, serviceUuid, onDataReceived, (void*)movement);
+BleCharacteristic securityCharacteristic("security", BleCharacteristicProperty::WRITE, security, serviceUuid, onDataReceived, (void*)security);
 
 // Static function for handling Bluetooth Low Energy callbacks
 static void onDataReceived(const uint8_t* data, size_t len, const BlePeerDevice& peer, void* context) {
-  // Sets the global level
-  if( context == status ) 
-  {
-    RGB.color(0x00, data[0], 0x00);
-  }
-  Serial.printf("%d \n", data[0]);
-
-}
-
-// setup() runs once, when the device is first turned on.
-void setup() {
-
-  // Enable app control of LED
-  RGB.control(true);
-
-  // Add the characteristics
-  BLE.addCharacteristic(redCharacteristic);
-  BLE.addCharacteristic(statusCharacteristic);
-
-  // Advertising data
-  BleAdvertisingData advData;
-
-  // Add the RGB LED service
-  advData.appendServiceUUID(rgbService);
-
-  // Start advertising!
-  BLE.advertise(&advData);
-}
-
-// loop() runs over and over again, as quickly as it can execute.
-void loop() {
-    if (colour_state)
+    // If the control node has changed state, update the functionality of the sensor node.
+    if(context == security) 
     {
-        redCharacteristic.setValue(r1);
+        b_is_security_mode = data[0];
+    }
+}
+
+// ----------------------------------------------------------------------------
+// SLEEP MODE
+// ----------------------------------------------------------------------------
+SystemSleepConfiguration sleep_config;
+
+// ----------------------------------------------------------------------------
+// SETUP
+// ----------------------------------------------------------------------------
+void setup() {
+    // Add the Bluetooth characteristics.
+    BLE.addCharacteristic(temperatureCharacteristic);
+    BLE.addCharacteristic(soundCharacteristic);
+    BLE.addCharacteristic(movementCharacteristic);
+    BLE.addCharacteristic(securityCharacteristic);
+
+    // Begin advertising
+    BleAdvertisingData advData;
+    advData.appendServiceUUID(sensorNodeService);
+    BLE.advertise(&advData);
+
+    // Initialise the sensor pins
+    pinMode(fanPin, OUTPUT);
+
+    pinMode(tempPin, INPUT); 
+
+    pinMode(soundPin, INPUT); 
+
+    pinMode(echoPin, INPUT); 
+    pinMode(trigPin, OUTPUT);
+
+    // Initialise sleep mode characteristics. Only able to wake from a change in temperature value (30C threshold) or a BLE message, or if 60 minutes has passed.
+    sleep_config.mode(SystemSleepMode::ULTRA_LOW_POWER).duration(60min).ble().analog(tempPin, 800, AnalogInterruptMode::CROSS);
+
+    // Sets the RGB LED control so we can see what state the sensor node is in.
+    RGB.control(true);
+}
+
+// ----------------------------------------------------------------------------
+// LOOP
+// ----------------------------------------------------------------------------
+void loop() {
+
+    // Calculate how many hours board has been on
+    uint16_t hours_up = floor(millis()/MS_IN_HR) + 1; // Ceil not working properly?
+
+    // Check if the power budget for the hour has been exceeded.
+    b_in_power_budget = (total_pwr_consumption > hours_up*pwr_budget) ? 0 : 1;
+
+    // Running in NORMAL mode
+    if(!b_is_security_mode && b_in_power_budget)
+    {
+        // Set the LED to green.
+        RGB.color(0x00,0xFF,0x00);
+
+        // Determine the intensity that the fan needs to be.
+        curr_temp_val = readTempLevel();
+
+        if(curr_temp_val > 24)
+        {
+            curr_temp_lvl = F_HIGH;
+        }
+
+        else if((curr_temp_val > 20) && (curr_temp_val < 24))
+        {
+            curr_temp_lvl = F_LOW;
+        }
+
+        else if(curr_temp_val < 20)
+        {
+            curr_temp_lvl = F_OFF;
+        }
+
+        // If there has been a change in temperature state, update the CH.
+        if (curr_temp_lvl != prev_temp_lvl)
+        {
+            // Calculate the total amount of time that the module has been running at the (now previous) fan intensity level.
+            fan_pwr_time[1] = fan_pwr_time[0];
+            fan_pwr_time[0] = millis(); // Used to calculate the amount of power consumed.
+            float time_spent_sec = (fan_pwr_time[0] - fan_pwr_time[1]) * 1/1000; // ms * sec/ms
+
+            // Increment the total power consumption.
+            total_pwr_consumption += fan_pwr_consumption[prev_temp_lvl] * time_spent_sec;
+
+            // Change the fan level.
+            switch(curr_temp_lvl)
+            {
+                case F_LOW:
+                {
+                    analogWrite(fanPin, FAN_1);
+                    break;
+                }
+
+                case F_HIGH:
+                {
+                    analogWrite(fanPin, FAN_2);
+                    break;
+                }
+
+                case F_OFF:
+                {
+                    analogWrite(fanPin, FAN_OFF);
+                    break;
+                }
+
+                default:
+                {
+                    break;
+                }
+            }
+
+            // Send the updated information to the cluster head.
+            // D[0] - D[1]:     Temp value         [degC]
+            // D[2] - D[3]:     Power consumption   [mW]
+            uint32_t tempData = 0;
+
+            tempData |= curr_temp_val & 0xFF;
+            tempData |= fan_pwr_consumption[curr_temp_lvl] << 16;
+            temperatureCharacteristic.setValue(tempData);
+
+            // Current state is now the previous state since the CH has been updated.
+            prev_temp_lvl = curr_temp_lvl;
+        }
     }
 
+    // Running in throttled NORMAL mode
+    else if(!b_is_security_mode && !b_in_power_budget)
+    {
+        // Set the LED to red.
+        RGB.color(0xFF,0x00,0x00);
+
+        // In throttled mode, temperature level thresholds and the resulting fan intensity have been altered to preserve battery life.
+        // Additionally, if the fan is off, the node will go into sleep mode. It will only be able to be woken if the temperature ADC value cross the 30degC threshold or if the Cluster Head sends data.
+
+        // Determine the intensity that the fan needs to be.
+        curr_temp_val = readTempLevel();
+
+        if(curr_temp_val > 30)
+        {
+            curr_temp_lvl = F_LOW;
+        }
+
+        else
+        {
+            curr_temp_lvl = F_OFF;
+        }
+
+        // If there has been a change in fan state, update the CH.
+        if (curr_temp_lvl != prev_temp_lvl)
+        {
+            // Calculate the total amount of time that the module has been running at the (now previous) fan intensity level.
+            fan_pwr_time[1] = fan_pwr_time[0];
+            fan_pwr_time[0] = millis(); // Used to calculate the amount of power consumed.
+            float time_spent_hr = (fan_pwr_time[0] - fan_pwr_time[1]) * 1/1000 * 1/60 * 1/60; // ms * sec/ms * min/sec * hour/min
+
+            // Increment the total power consumption.
+            total_pwr_consumption += fan_pwr_consumption[prev_temp_lvl] * time_spent_hr;
+
+            // Change the fan level.
+            switch(curr_temp_lvl)
+            {
+                case F_LOW:
+                {
+                    analogWrite(fanPin, FAN_1);
+                    break;
+                }
+
+                case F_OFF:
+                {
+                    analogWrite(fanPin, FAN_OFF);
+                    break;
+                }
+
+                default:
+                {
+                    break;
+                }
+            }
+
+            // Send the updated information to the cluster head.
+            // D[0] - D[1]:     Temp value         [degC]
+            // D[2] - D[3]:     Power consumption   [mW]
+            uint32_t tempData = 0;
+
+            tempData |= curr_temp_val & 0xFF;
+            tempData |= fan_pwr_consumption[curr_temp_lvl] << 16;
+            temperatureCharacteristic.setValue(tempData);
+
+            // Current state is now the previous state since the CH has been updated.
+            prev_temp_lvl = curr_temp_lvl;
+        }
+
+        // If the temp is off, go into sleep mode.
+        if(prev_temp_lvl == FAN_OFF)
+        {
+            System.sleep(sleep_config);
+        }
+
+    }
+
+    // Running in SECURITY mode
     else
     {
-        redCharacteristic.setValue(r2);
+        // Set the LED to blue.
+        RGB.color(0x00,0x00,0xFF);
+
+        // Read the movement sensor
+
+        // To prevent a false positive security event, make both values equal to the same value on the first read.
+        if(b_is_first_dist_read)
+        {
+            b_is_first_dist_read = 0;
+            curr_dist_val = readDistance();
+            prev_dist_val = curr_dist_val;
+        }
+
+        prev_dist_val = curr_dist_val;
+        curr_dist_val = readDistance();
+
+        // If the distance change was greater than 10cm, can assume that movement has occured.
+        if(abs(curr_dist_val - prev_dist_val) > 10)
+        {
+            b_is_security_event = 1;
+            eventTrigger = MOVEMENT;
+        }
+
+        // Read the sound sensor.
+        curr_sound_val = readSoundLevel();
+
+        if(curr_sound_val > 80)
+        {
+            b_is_security_event = 1;
+            eventTrigger = SOUND;
+        } 
+        else if(curr_sound_val > 70)
+        {
+            // If this is the first time that it's been this sound level, begin counting the duration.
+            if(!b_is_first_sound_instance)
+            {
+                b_is_first_sound_instance = 1;
+                sound_start_time = millis();
+            }
+            
+            else
+            {
+                unsigned long current_sound_time = millis();
+
+                // If it's been longer than 10 seconds, report a security event.
+                if((current_sound_time - sound_start_time) > 10000)
+                {
+                    sound_duration_sec = (uint8_t)((current_sound_time - sound_start_time)/1000);
+                    b_is_security_event = 1;
+                    b_is_first_sound_instance = 0;
+                }
+            }
+
+        }
+        else if((curr_sound_val <= 70) && (curr_sound_val >= 55))
+        {
+            // If this is the first time that it's been this sound level, begin counting the duration.
+            if(!b_is_first_sound_instance)
+            {
+                b_is_first_sound_instance = 1;
+                sound_start_time = millis();
+            }
+            
+            else
+            {
+                unsigned long current_sound_time = millis();
+
+                // If it's been longer than 30 seconds, report a security event.
+                if((current_sound_time - sound_start_time) > 30000)
+                {
+                    sound_duration_sec = (uint8_t)((current_sound_time - sound_start_time)/1000);
+                    b_is_security_event = 1;
+                    b_is_first_sound_instance = 0;
+                }
+            }
+        }
+
+        // If a security event has been detected, notify the CH.
+        if(b_is_security_event)
+        {
+            // Send the updated information to the cluster head.
+            switch(eventTrigger)
+            {
+                // -- Sound event --
+                // D[0]: Sound level [dbA]
+                // D[1]: Sound duration [sec]
+                case SOUND:
+                {
+                    uint16_t soundData = 0;
+                    soundData |= (uint8_t)curr_sound_val;
+                    soundData |= sound_duration_sec << 8;
+                    soundCharacteristic.setValue(soundData);
+                    break;
+                }
+
+                // -- Movement event --
+                // D[0] - D[1]: Distance [cm]
+                case MOVEMENT:
+                {
+                    uint16_t movementData = curr_dist_val;
+                    movementCharacteristic.setValue(movementData);
+                    break;
+                }
+                
+                default: // Also covers NONE.
+                {
+                    break;
+                }
+            }
+
+            // Reset the trigger now that the CH has been notified.
+            eventTrigger = NONE;
+            b_is_security_event = 0;
+        }
+    }
+}
+
+/*
+ * @brief Reads the current light level from the sensor.
+ * @returns The resulting light level in lux.
+*/
+long readTempLevel()
+{
+    reading = analogRead(tempPin);
+    voltage = reading * 0.806;
+    temp_res = (voltage - 500) / 10;
+
+    return temp_res;
+}
+
+/*
+ * @brief Reads the current sound level from the sensor.
+ * @returns The resulting sound level in dBa.
+*/
+float readSoundLevel()
+{
+    unsigned int tempSoundRead = 0;  // Summation of sound reads.
+    unsigned int maxAmpl = 0;
+    unsigned int minAmpl = 4096;
+
+    for(int i = 0; i < NUM_SOUND_READS; i++)
+    {
+        tempSoundRead = analogRead(soundPin);
+
+        if (tempSoundRead > maxAmpl)
+        {
+            maxAmpl = tempSoundRead;
+        }
+
+        if (tempSoundRead < minAmpl)
+        {
+            minAmpl = tempSoundRead;
+        }
     }
 
-    delay(5000);
-    colour_state = !colour_state;
+    soundPkPk = maxAmpl - minAmpl;
+    soundVout = 3.3 * soundPkPk/4096;
+    soundDba = 17.831 * log(soundVout) + 87.579;  
+
+    return soundDba;
+}
+
+/*
+ * @brief Reads the distance of an object from the sensor.
+ * @returns The resulting distance in cm.
+*/
+int readDistance()
+{
+    // Clears the trigPin
+    digitalWrite(trigPin, LOW);
+    delayMicroseconds(2);
+    // Sets the trigPin on HIGH state for 10 micro seconds
+    digitalWrite(trigPin, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(trigPin, LOW);
+    // Reads the echoPin, returns the sound wave travel time in microseconds
+    duration = pulseIn(echoPin, HIGH);
+    // Calculating the distance
+    distance = duration * 0.034 / 2;
+    
+    // If the distance is greater than the sensors maximum allowable measurement, set value to zero.
+    if(distance > 400)
+    {
+        distance = 0;
+    }
+
+    return distance;
 }
 #endif
 
