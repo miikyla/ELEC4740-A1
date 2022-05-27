@@ -134,6 +134,8 @@ void setup() {
     BLE.advertise(&advData);
 
     // Initialise the sensor pins
+    pinMode(lampPin, OUTPUT);
+
     pinMode(lightPin, INPUT); 
 
     pinMode(soundPin, INPUT); 
