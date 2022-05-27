@@ -3,7 +3,6 @@
 //#define CENTRAL
 
 #include "Particle.h"
-#include "dct.h"
 #include "math.h"
 
 #define MS_IN_HR 3600000
