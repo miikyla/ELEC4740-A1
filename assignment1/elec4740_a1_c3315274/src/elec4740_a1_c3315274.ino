@@ -144,6 +144,9 @@ void setup() {
 
     // Initialise sleep mode characteristics. Only able to wake from a change in the light levels or a BLE message, or if 60 minutes has passed.
     sleep_config.mode(SystemSleepMode::ULTRA_LOW_POWER).duration(60min).ble().analog(lightPin, 1000, AnalogInterruptMode::CROSS);
+
+    // Sets the RGB LED control so we can see what state the sensor node is in.
+    RGB.control(true);
 }
 
 // ----------------------------------------------------------------------------
@@ -163,6 +166,9 @@ void loop() {
     // Running in NORMAL mode
     if(!b_is_security_mode && b_in_power_budget)
     {
+        // Set the LED to green.
+        RGB.color(0x00,0xFF,0x00);
+
         // Determine the intensity that the LED needs to be.
         curr_light_val = readLightLevel();
 
@@ -236,6 +242,9 @@ void loop() {
     // Running in throttled NORMAL mode
     else if(!b_is_security_mode && !b_in_power_budget)
     {
+        // Set the LED to red.
+        RGB.color(0xFF,0x00,0x00);
+
         // In throttled mode, light level thresholds and the resulting light intensity have been altered to preserve battery life.
         // Additionally, if the light level is high enough, the node will go into sleep mode. It will only be able to be woken if the light ADC value cross the 400 lux threshold or if the Cluster Head sends data.
 
@@ -307,6 +316,9 @@ void loop() {
     // Running in SECURITY mode
     else
     {
+        // Set the LED to blue.
+        RGB.color(0x00,0x00,0xFF);
+
         // Read the movement sensor
 
         // To prevent a false positive security event, make both values equal to the same value on the first read.
