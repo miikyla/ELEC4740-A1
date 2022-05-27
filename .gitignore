@@ -30,3 +30,10 @@
 *.exe
 *.out
 *.app
+assignment1/elec4740_a1_c3315274/target/3.2.0/argon/elec4740_a1_c3315274.bin.no_crc
+*.dfu
+*.elf
+*.hex
+*.lst
+*.map
+*.ld

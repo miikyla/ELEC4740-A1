@@ -6,6 +6,8 @@
 #include "dct.h"
 #include "math.h"
 
+#define MS_IN_HR 3600000
+
 #define NUM_LIGHT_READS 100
 #define NUM_SOUND_READS 500
 
@@ -15,10 +17,17 @@
 
 enum lightLevel
 {
-    OFF,
-    LOW,
-    MED,
-    HIGH
+    L_OFF,
+    L_LOW,
+    L_MED,
+    L_HIGH
+};
+
+enum alarmSource
+{
+    NONE,
+    MOVEMENT,
+    SOUND
 };
 
 SYSTEM_MODE(MANUAL);
@@ -28,14 +37,28 @@ SYSTEM_MODE(MANUAL);
 // SYSTEM VARIABLES
 // ----------------------------------------------------------------------------
 // System state
-bool b_is_security_mode     = 0;
+bool b_is_security_mode     = 0;    // Set high when the sensor node is operating in SECURITY mode.
+bool b_is_security_event    = 0;    // Set high when a notifiable security event has occured.
+bool b_in_power_budget      = 1;    // Set low when the hourly power consumption budget has been exceeded.
+alarmSource eventTrigger    = NONE; // Cause of security incident when operating in SECURITY mode.
 
 long curr_light_val         = 0;
-lightLevel prev_light_lvl   = OFF;
-lightLevel curr_light_lvl   = OFF;
+lightLevel prev_light_lvl   = L_OFF;
+lightLevel curr_light_lvl   = L_OFF;
 
-float curr_sound_val    = 0;
-int curr_dist_val       = 0;
+uint16_t light_pwr_consumption[4]   = {0, 5, 7, 10};    // Power consumed by the light module when in each enum lightLevel [mW]
+unsigned long light_pwr_time[2]     = {0,0};            // Start time and end time of the current light level to calculate power consumption [ms]
+float total_pwr_consumption         = 0;                // Lifetime power consumption of the device since bootup [mWh]
+const float pwr_budget              = 2100;             // Maximum amount of power consumption allowed per hour before power management kicks and throttles NORMAL mode [mWh]
+
+float curr_sound_val        = 0;
+uint8_t sound_duration_sec  = 0;
+bool b_is_first_sound_instance  = 0;
+unsigned long sound_start_time  = 0;
+
+int curr_dist_val           = 0;
+int prev_dist_val           = 0; 
+bool b_is_first_dist_read   = 1;
 
 // Lamp actuator
 const int lampPin   = D2;
@@ -90,6 +113,12 @@ static void onDataReceived(const uint8_t* data, size_t len, const BlePeerDevice&
         b_is_security_mode = data[0];
     }
 }
+
+// ----------------------------------------------------------------------------
+// SLEEP MODE
+// ----------------------------------------------------------------------------
+SystemSleepConfiguration sleep_config;
+
 // ----------------------------------------------------------------------------
 // SETUP
 // ----------------------------------------------------------------------------
@@ -112,30 +141,167 @@ void setup() {
 
     pinMode(echoPin, INPUT); 
     pinMode(trigPin, OUTPUT);
+
+    // Initialise sleep mode characteristics. Only able to wake from a change in the light levels or a BLE message, or if 60 minutes has passed.
+    sleep_config.mode(SystemSleepMode::ULTRA_LOW_POWER).duration(60min).ble().analog(lightPin, 1000, AnalogInterruptMode::CROSS);
 }
 
 // ----------------------------------------------------------------------------
 // LOOP
 // ----------------------------------------------------------------------------
 void loop() {
-    // Running in NORMAL mode
-    if(!b_is_security_mode)
+
+    // Calculate how many hours board has been on
+    uint16_t hours_up = floor(millis()/MS_IN_HR);
+
+    // Check if the power budget for the hour has been exceeded.
+    if(total_pwr_consumption > hours_up*pwr_budget)
     {
-        // If the light level has changed into a different state, change the lamp intensity and report back to the CH.
+        b_in_power_budget = 0;
+    }
+
+    // Running in NORMAL mode
+    if(!b_is_security_mode && b_in_power_budget)
+    {
+        // Determine the intensity that the LED needs to be.
         curr_light_val = readLightLevel();
 
         if(curr_light_val > 400)
         {
-            analogWrite(lampPin, LIGHT_50);
-        } 
+            curr_light_lvl = L_LOW;
+        }
+
         else if((curr_light_val > 200) && (curr_light_val < 400))
         {
-            analogWrite(lampPin, LIGHT_75);
+            curr_light_lvl = L_MED;
         }
+
         else if(curr_light_val < 200)
         {
-            analogWrite(lampPin, LIGHT_100);
+            curr_light_lvl = L_HIGH;
         }
+
+        // If there has been a change in LED state, update the CH.
+        if (curr_light_lvl != prev_light_lvl)
+        {
+            // Calculate the total amount of time that the module has been running at the (now previous) light intensity level.
+            light_pwr_time[1] = light_pwr_time[0];
+            light_pwr_time[0] = millis(); // Used to calculate the amount of power consumed.
+            float time_spent_hr = (light_pwr_time[0] - light_pwr_time[1]) * 1/1000 * 1/60 * 1/60; // ms * sec/ms * min/sec * hour/min
+
+            // Increment the total power consumption.
+            total_pwr_consumption += light_pwr_consumption[prev_light_lvl] * time_spent_hr;
+
+            // Change the light level.
+            switch(curr_light_lvl)
+            {
+                case L_LOW:
+                {
+                    analogWrite(lampPin, LIGHT_50);
+                    break;
+                }
+
+                case L_MED:
+                {
+                    analogWrite(lampPin, LIGHT_75);
+                    break;
+                }
+
+                case L_HIGH:
+                {
+                    analogWrite(lampPin, LIGHT_100);
+                    break;
+                }
+
+                default:
+                {
+                    break;
+                }
+            }
+
+            // Send the updated information to the cluster head.
+            // D[0] - D[1]:     Light value         [lux]
+            // D[2] - D[3]:     Power consumption   [mW]
+            uint32_t lightData = 0;
+
+            lightData |= curr_light_val & 0xFF;
+            lightData |= light_pwr_consumption[curr_light_lvl] << 16;
+            lightCharacteristic.setValue(lightData);
+
+            // Current state is now the previous state since the CH has been updated.
+            prev_light_lvl = curr_light_lvl;
+        }
+    }
+
+    // Running in throttled NORMAL mode
+    else if(!b_is_security_mode && !b_in_power_budget)
+    {
+        // In throttled mode, light level thresholds and the resulting light intensity have been altered to preserve battery life.
+        // Additionally, if the light level is high enough, the node will go into sleep mode. It will only be able to be woken if the light ADC value cross the 400 lux threshold or if the Cluster Head sends data.
+
+        // Determine the intensity that the LED needs to be.
+        curr_light_val = readLightLevel();
+
+        if(curr_light_val > 400)
+        {
+            curr_light_lvl = L_OFF;
+        }
+
+        else{
+            curr_light_lvl = L_LOW;
+        }
+
+        // If there has been a change in LED state, update the CH.
+        if (curr_light_lvl != prev_light_lvl)
+        {
+            // Calculate the total amount of time that the module has been running at the (now previous) light intensity level.
+            light_pwr_time[1] = light_pwr_time[0];
+            light_pwr_time[0] = millis(); // Used to calculate the amount of power consumed.
+            float time_spent_hr = (light_pwr_time[0] - light_pwr_time[1]) * 1/1000 * 1/60 * 1/60; // ms * sec/ms * min/sec * hour/min
+
+            // Increment the total power consumption.
+            total_pwr_consumption += light_pwr_consumption[prev_light_lvl] * time_spent_hr;
+
+            // Change the light level.
+            switch(curr_light_lvl)
+            {
+                case L_OFF:
+                {
+                    analogWrite(lampPin, 0);
+                    break;
+                }
+
+                case L_LOW:
+                {
+                    analogWrite(lampPin, LIGHT_50);
+                    break;
+                }
+
+                default:
+                {
+                    break;
+                }
+            }
+
+            // Send the updated information to the cluster head.
+            // D[0] - D[1]:     Light value         [lux]
+            // D[2] - D[3]:     Power consumption   [mW]
+            uint32_t lightData = 0;
+
+            lightData |= curr_light_val & 0xFF;
+            lightData |= light_pwr_consumption[curr_light_lvl] << 16;
+            lightCharacteristic.setValue(lightData);
+
+            // Current state is now the previous state since the CH has been updated.
+            prev_light_lvl = curr_light_lvl;
+        }
+
+        // If the light is off, go into sleep mode.
+        if(prev_light_lvl == L_OFF)
+        {
+            System.sleep(sleep_config);
+        }
+
     }
 
     // Running in SECURITY mode
@@ -143,11 +309,115 @@ void loop() {
     {
         // Read the movement sensor
 
-        // If a change has been detected, notify the CH.
+        // To prevent a false positive security event, make both values equal to the same value on the first read.
+        if(b_is_first_dist_read)
+        {
+            b_is_first_dist_read = 0;
+            curr_dist_val = readDistance();
+            prev_dist_val = curr_dist_val;
+        }
+
+        prev_dist_val = curr_dist_val;
+        curr_dist_val = readDistance();
+
+        // If the distance change was greater than 10cm, can assume that movement has occured.
+        if(abs(curr_dist_val - prev_dist_val) > 10)
+        {
+            b_is_security_event = 1;
+            eventTrigger = MOVEMENT;
+        }
 
         // Read the sound sensor.
+        curr_sound_val = readSoundLevel();
 
-        // If a change has been detected, notify the CH.
+        if(curr_sound_val > 80)
+        {
+            b_is_security_event = 1;
+            eventTrigger = SOUND;
+        } 
+        else if(curr_sound_val > 70)
+        {
+            // If this is the first time that it's been this sound level, begin counting the duration.
+            if(!b_is_first_sound_instance)
+            {
+                b_is_first_sound_instance = 1;
+                sound_start_time = millis();
+            }
+            
+            else
+            {
+                unsigned long current_sound_time = millis();
+
+                // If it's been longer than 10 seconds, report a security event.
+                if((current_sound_time - sound_start_time) > 10000)
+                {
+                    sound_duration_sec = (uint8_t)((current_sound_time - sound_start_time)/1000);
+                    b_is_security_event = 1;
+                    b_is_first_sound_instance = 0;
+                }
+            }
+
+        }
+        else if((curr_sound_val <= 70) && (curr_sound_val >= 55))
+        {
+            // If this is the first time that it's been this sound level, begin counting the duration.
+            if(!b_is_first_sound_instance)
+            {
+                b_is_first_sound_instance = 1;
+                sound_start_time = millis();
+            }
+            
+            else
+            {
+                unsigned long current_sound_time = millis();
+
+                // If it's been longer than 30 seconds, report a security event.
+                if((current_sound_time - sound_start_time) > 30000)
+                {
+                    sound_duration_sec = (uint8_t)((current_sound_time - sound_start_time)/1000);
+                    b_is_security_event = 1;
+                    b_is_first_sound_instance = 0;
+                }
+            }
+        }
+
+        // If a security event has been detected, notify the CH.
+        if(b_is_security_event)
+        {
+            // Send the updated information to the cluster head.
+            switch(eventTrigger)
+            {
+                // -- Sound event --
+                // D[0]: Sound level [dbA]
+                // D[1]: Sound duration [sec]
+                case SOUND:
+                {
+                    uint16_t soundData = 0;
+                    soundData |= (uint8_t)curr_sound_val;
+                    soundData |= sound_duration_sec << 8;
+                    soundCharacteristic.setValue(soundData);
+                    break;
+                }
+
+                // -- Movement event --
+                // D[0] - D[1]: Distance [cm]
+                case MOVEMENT:
+                {
+                    uint16_t movementData = curr_dist_val;
+                    movementCharacteristic.setValue(movementData);
+                    break;
+                }
+                
+                default: // Also covers NONE.
+                {
+                    break;
+                }
+            }
+
+            // Reset the trigger now that the CH has been notified.
+            eventTrigger = NONE;
+            b_is_security_event = 0;
+        }
     }
 }
 
