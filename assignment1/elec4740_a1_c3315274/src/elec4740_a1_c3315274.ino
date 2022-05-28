@@ -250,8 +250,9 @@ void loop() {
             // D[0] - D[1]:     Light value         [lux]
             // D[2] - D[3]:     Power consumption   [mW]
             uint32_t lightData = 0;
+            Serial.printf("CURRENT LIGHT LEVEL IS: %d", curr_light_val);
 
-            lightData |= curr_light_val & 0xFF;
+            lightData |= (uint16_t)curr_light_val;
             lightData |= light_pwr_consumption[curr_light_lvl] << 16;
 
             lightCharacteristic.setValue(lightData);
