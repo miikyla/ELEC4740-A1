@@ -966,8 +966,8 @@ void loop() {
 }
 
 /*
- * @brief Reads the current light level from the sensor.
- * @returns The resulting light level in lux.
+ * @brief Reads the current temp level from the sensor.
+ * @returns The resulting temp level in degC.
 */
 long readTempLevel()
 {
@@ -1039,6 +1039,48 @@ int readDistance()
 #endif
 
 #ifdef CENTRAL
+
+enum securityReporter
+{
+    NONE,
+    SN1,
+    SN2
+};
+
+enum securityState
+{
+    NORMAL,
+    SECURITY
+};
+
+// ----------------------------------------------------------------------------
+// SECURITY
+// ----------------------------------------------------------------------------
+const int trigPin   = D2;
+
+bool b_security_event_occured = 0;
+securityReporter reporting_node = NONE;
+
+uint16_t security_distance_cm   = 0;
+
+uint8_t security_sound_dba      = 0;
+uint8_t security_sound_duration_sec = 0;
+
+// ----------------------------------------------------------------------------
+// SYSTEM VARIABLES
+// ----------------------------------------------------------------------------
+securityState current_state = NORMAL;
+securityState requested_state = NORMAL;
+
+uint16_t sn1_light_level_lux    = 0;
+uint16_t sn1_power_usage_mW     = 0;
+
+uint16_t sn2_temp_level_degc    = 0;
+uint16_t sn2_power_usage_mW     = 0;
+
+// ----------------------------------------------------------------------------
+// BLUETOOTH
+// ----------------------------------------------------------------------------
 const size_t SCAN_RESULT_MAX = 30;
 BleScanResult scanResults[SCAN_RESULT_MAX];
 const size_t SCAN_RESULT_COUNT = 20;
@@ -1073,16 +1115,57 @@ const BleUuid sn2MovementUuid("b4250503-fb4b-4746-b2b0-93f0e61122c6");
 const BleUuid sn2SecurityUuid("b4250504-fb4b-4746-b2b0-93f0e61122c6");
 
 // BLUETOOTH
-bool led_state = 0;
-uint16_t led_on = 0xFF;
-uint16_t led_off = 0x00;
+uint16_t security_mode = 0xFF;
+uint16_t normal_mode = 0x00;
 uint16_t timer = 10000;
 
-// BLUETOOTH DATA
+// BLUETOOTH DATA CALLBACKS
 
-void onDataReceived(const uint8_t* data, size_t len, const BlePeerDevice& peer, void* context) {
-    Serial.printf("%d \n", data[0]);
+void sn1LightCB(const uint8_t* data, size_t len, const BlePeerDevice& peer, void* context) {
+    sn1_light_level_lux = (data[1] << 8) | data[0];
+    sn1_power_usage_mW = (data[3] << 8) | data[2];
 }
+
+void sn1SoundCB(const uint8_t* data, size_t len, const BlePeerDevice& peer, void* context) {
+    security_sound_dba = (data[1] << 8) | data[0];
+    security_sound_duration_sec = (data[3] << 8) | data[2];
+
+    reporting_node = SN1;
+    b_security_event_occured = 1;
+}
+
+void sn1MoveCB(const uint8_t* data, size_t len, const BlePeerDevice& peer, void* context) {
+    security_distance_cm = data[0];
+
+    reporting_node = SN1;
+    b_security_event_occured = 1;
+}
+
+void sn2TempCB(const uint8_t* data, size_t len, const BlePeerDevice& peer, void* context) {
+    sn2_temp_level_degc = (data[1] << 8) | data[0];
+    sn2_power_usage_mW = (data[3] << 8) | data[2];
+}
+
+void sn2SoundCB(const uint8_t* data, size_t len, const BlePeerDevice& peer, void* context) {
+    security_sound_dba = (data[1] << 8) | data[0];
+    security_sound_duration_sec = (data[3] << 8) | data[2];
+
+    reporting_node = SN2;
+    b_security_event_occured = 1;
+}
+
+void sn2MoveCB(const uint8_t* data, size_t len, const BlePeerDevice& peer, void* context) {
+    security_distance_cm = data[0];
+
+    reporting_node = SN2;
+    b_security_event_occured = 1;
+}
+
+// ----------------------------------------------------------------------------
+// LCD
+// ----------------------------------------------------------------------------
+DFRobot_LCD lcd(16, 2); // 16 characters and 2 rows
+
 
 void setup() {
     Serial.begin();
@@ -1090,38 +1173,71 @@ void setup() {
 
     RGB.control(true);
 
-    sn1RedCharacteristic.onDataReceived(onDataReceived, &sn1RedCharacteristic);
-    sn2RedCharacteristic.onDataReceived(onDataReceived, &sn2RedCharacteristic);
+    // Initialise all the characteristics available for the sensor nodes.
+    sn1LightCharacteristic.onDataReceived(sn1LightCB, &sn1LightCharacteristic);
+    sn1SoundCharacteristic.onDataReceived(sn1SoundCB, &sn1SoundCharacteristic);
+    sn1MovementCharacteristic.onDataReceived(sn1MoveCB, &sn1MovementCharacteristic);
+
+    sn2TemperatureCharacteristic.onDataReceived(sn2TempCB, &sn2TemperatureCharacteristic);
+    sn2SoundCharacteristic.onDataReceived(sn2SoundCB, &sn2SoundCharacteristic);
+    sn2MovementCharacteristic.onDataReceived(sn2MoveCB, &sn2MovementCharacteristic);
+
+    // Initialise the sensor pins
+    pinMode(trigPin, INPUT);
+
+    // Initialise the LCD
+    lcd.init();
+    lcd.setBacklight(0);
+    lcd.clear();
+
 }
 
 void loop() {
-    if (BLE.connected()) {
-        if (timer > 0)
+    // Only run CH operations if both Sensor Nodes are connected to the Cluster Head.
+    lcd.setCursor(0, 0);
+    lcd.print("AAAAAAAAAABBBBBBBBBB");
+    lcd.setCursor(0, 1);
+    lcd.print("CCCCCCCCCCDDDDDDDDDD");
+    lcd.setCursor(0, 0);
+    lcd.print("CCCCCCCCCC");
+
+    if (sn1Peer.connected() && sn2Peer.connected()) {
+        RGB.color(0x00,0xFF,0x00);
+
+        // See what the desired security state is for the Sensor Nodes.
+        requested_state = (digitalRead(trigPin) == HIGH) ? SECURITY : NORMAL;
+        Serial.printf("requested state is %d: \n", digitalRead(trigPin));
+
+        // If there has been a change in operation state, notify the Sensor Nodes.
+        if(requested_state != current_state)
         {
-            timer--;
+            if(requested_state == SECURITY)
+            {
+                current_state = requested_state;
+
+                sn1SecurityCharacteristic.setValue(security_mode);
+                sn2SecurityCharacteristic.setValue(security_mode);
+            }
+
+            else if (requested_state == NORMAL)
+            {
+                current_state = requested_state;
+                
+                sn1SecurityCharacteristic.setValue(normal_mode);
+                sn2SecurityCharacteristic.setValue(normal_mode);
+            }
         }
 
-        else
+        // See if there's been a security incident that needs responding to.
+        if(b_security_event_occured)
         {
-            timer = 10000;
 
-            if (led_state)
-            {
-                sn1StatusCharacteristic.setValue(led_on);
-                sn2StatusCharacteristic.setValue(led_on);
-            }
-
-            else
-            {
-                sn1StatusCharacteristic.setValue(led_off);
-                sn2StatusCharacteristic.setValue(led_off);
-            }
-
-            led_state = !led_state;
         }
     }
     
     else {
+        RGB.color(0x00,0x00,0xFF);
+        // Need to establish connections with both the sensor nodes.
     	if (millis() - lastScan >= SCAN_PERIOD_MS) {
     		// Time to scan
     		lastScan = millis();
@@ -1134,23 +1250,20 @@ void loop() {
 					if (svcCount > 0 && foundServiceUuid == sn1ServiceUuid) {
 						sn1Peer = BLE.connect(scanResults[ii].address());
 						if (sn1Peer.connected()) {
-							sn1Peer.getCharacteristicByUUID(sn1RedCharacteristic, sn1RedUuid);
-							sn1Peer.getCharacteristicByUUID(sn1StatusCharacteristic, sn1StatusUuid);
-                            RGB.color(0xFF, 0x00, 0x00);
+							sn1Peer.getCharacteristicByUUID(sn1LightCharacteristic, sn1LightUuid);
+							sn1Peer.getCharacteristicByUUID(sn1SoundCharacteristic, sn1SoundUuid);
+                            sn1Peer.getCharacteristicByUUID(sn1MovementCharacteristic, sn1MovementUuid);
+                            sn1Peer.getCharacteristicByUUID(sn1SecurityCharacteristic, sn1SecurityUuid);
 						}
 					}
                     if (svcCount > 0 && foundServiceUuid == sn2ServiceUuid)
                         sn2Peer = BLE.connect(scanResults[ii].address());
 						if (sn2Peer.connected()) {
-                            sn2Peer.getCharacteristicByUUID(sn2RedCharacteristic, sn2RedUuid);
-							sn2Peer.getCharacteristicByUUID(sn2StatusCharacteristic, sn2StatusUuid);
-                            RGB.color(0x00, 0xFF, 0x00);
+							sn2Peer.getCharacteristicByUUID(sn2TemperatureCharacteristic, sn2TemperatureUuid);
+							sn2Peer.getCharacteristicByUUID(sn2SoundCharacteristic, sn2SoundUuid);
+                            sn2Peer.getCharacteristicByUUID(sn2MovementCharacteristic, sn2MovementUuid);
+                            sn2Peer.getCharacteristicByUUID(sn2SecurityCharacteristic, sn2SecurityUuid);
 						}
-
-                    else
-                    {
-                        RGB.color(0x00, 0x00, 0xFF);
-                    }
 				}
 			}
     	}
